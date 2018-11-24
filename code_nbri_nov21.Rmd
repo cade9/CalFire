@@ -1,0 +1,335 @@
+---
+title: "Burn Index"
+author: "cade"
+date: "11/17/2018"
+output: html_notebook
+---
+### Description 
+
+This code notebook has processes Landsat 8 files that are downloaded from Earth Explorer in the following order:
+1. Untars files
+2. Layer Stacks Multi-spectral bands
+3. Calculates NBR
+4. Calculate dNBR
+5. Applies a severity index
+
+Future:
+6. Crops file to the burn perimeter 
+7. Totals the acreage for each burn type specified by the burn severity. 
+
+Future updates:
+All loops will be switched to functions to improve efficiency. 
+
+** USER REQUIREMENTS **
+Downloaded Landsat 5 or 8 files. 
+A CSV with the following information
+
+### Code
+
+```{r}
+#packages
+require(raster)
+require(rgdal)
+require(stringr)
+require(RStoolbox)
+require(tictoc)
+require(readxl)
+require(tidyverse)
+require(lubridate)
+require(tools)
+require(magrittr)
+
+```
+
+**User Defined Variables**
+*Note: each user must edit this portion*
+Any line code with the symbol #~! will be updated in the future. The type of update will be listed in the code block.
+
+```{r}
+# userDefined variables
+# 1) burn Info sheet 
+# must have columns 
+# Name,	County,	Acres,	Start date,	Containment date,	lat,	long,	PreDate,	PostDate,	Sensor,	path,	row	notes,	cadeComment,	cloudMask,	MultipleScenes
+burnInfoDir <- "Z:\\Cade\\CalFire\\Data\\sampleHistorical\\sampleFires_nov23_cade.xlsx"
+# 2) Image Directory - tar.gz files for all of the acquired sceness
+imgDir <- "./Data/Sample_fires"
+# 3) Output Directory of images that are layer stacked
+outSR <- "./Output/StackedSR_historical"
+# 4) Output Directory of BurnIndex
+outBurn <- "./Output/NBR_historical"
+# 5) Output Directory of dNBR
+outDNBR <- "./Output/dNBR_historical"
+# 6) Output Directory of burnSeverity dNBR
+# not ued yet 
+# outSev <- "Z:\\Cade\\CalFire\\Output\\Severity"
+# 7) input  of fire perimeter 
+inShp <- "./Data/shapefiles/perimeter"
+# 8) Output of table for acres
+outArea <- "./Output/AreaCalcs"
+
+
+```
+
+```{r}
+# edit burn info data to have the correct pre and post fire information
+# Thi should have also a more elegant way to add 0s to path and row - if there are three numbers do nothing 
+# if there are 2 numbers then add 0s
+burnInfo <- read_excel(burnInfoDir) %>%
+  #filter(cadeComment == "good") %>%
+  mutate(preImg = paste0(outBurn,"/",Sensor,paste0(0,path),paste0(0,row),year(PreDate),
+                         substr(PreDate,6,7),substr(PreDate,9,10),"01T1","_nbr.tif"),
+         postImg = paste0(outBurn,"/",Sensor,paste0(0,path),paste0(0,row),year(PostDate),
+                          substr(PostDate,6,7),substr(PostDate,9,10),"01T1","_nbr.tif"),
+         dNBRImg = paste0(outDNBR,"/",Name,"_",`Start date`, "_", Sensor, paste0(0,path),
+                          paste0(0,row),"_dNBR.tif"))
+csvOutName = paste0(file_path_sans_ext(burnInfoDir),"_updated.csv")
+write_csv(burnInfo,csvOutName)
+```
+
+
+### Step 1: Selection of Images 
+All Images were selected using the USGS Earth Explorer webpage
+
+### Step 2: Download Data
+Surface reflectance products that have been ordered using Earth Explorer can be downloaded using espa.tools. The username, password and order ID number must be known
+```{r}
+# example
+#require(espa.tools)
+# earthexplorer_download(usgs_eros_username = "cade", usgs_eros_password = "1234", 
+#                        output_folder = "Z:\\Data\\SurfaceReflctance",
+#                        ordernum = "espa-C.ade92@gmail.com-0101809057908")
+
+
+```
+
+### Step 3: Unzip files
+This will result in a number of  tar.gz files that have a single GEOtiff for each band and some ancillary information. The following step untars the file and creates a new out folder based on the file name (see comments in ```landUntar.R``` for further details). 
+```{r}
+# function for untarring and organizing landsat level 2 data
+source("./Functions/landUntar.R")
+#list original tared data
+orig.data = list.files(imgDir,pattern=".tar$|.tar.gz$",full.names = T)
+tic("unzip")
+lapply(orig.data,landUntar)
+toc()
+## 2255.02 
+## Ran Wednesday 11/13 cade computer 
+
+```
+
+
+#### Step 4: Layerstack bands 
+Stack the bands in each folder.
+You want the sr_band1.tif - sr_band7.tif
+
+To update in the future, will include a quick looks with the fire point and zoom in of the area. 
+
+```{r}
+# list all your directories
+folders <-list.dirs(path = imgDir, full.names = TRUE, recursive = FALSE)[6]
+
+source("./Functions/stackLandsat.R")
+tic("stack")
+lapply(folders,stackLandsat, outSF = outSR)
+toc()
+
+# re-ran Friday 11/16 cade computer
+```
+
+#### Step 5: Calculate NBR
+
+```{r}
+# list image stacks 
+imgSF <- list.files(outSR,  pattern = "tif$", full.names = T)
+tic("calcualte NBR")
+source("./Functions/calcNBR.R")
+lapply(imgSF,calcNBR, outDir = outBurn) 
+toc()
+
+# 599.58 
+
+```
+
+### Step 6: Difference burn images
+
+```{r}
+
+beginCluster(n=5)
+tic("calcualte dNBR")
+for (i in 2:nrow(burnInfo)){
+  # subset data frame by row
+  fireEvent <- burnInfo %>%
+    slice(i) #i
+  # read in preFire ndr
+  preFireNBR <- raster(fireEvent$preImg)
+  # read in post fire ndr
+  postFireNBR <- raster(fireEvent$postImg)
+  # calculate nbr
+  dNBR <- preFireNBR - postFireNBR
+  writeRaster(dNBR, fireEvent$dNBRImg, format ="GTiff", overwrite = T)
+  rm(preFireNBR)
+  rm(postFireNBR)
+  rm(dNBR)
+  removeTmpFiles(h=0)
+}
+endCluster()
+toc
+
+```
+
+
+
+### Step 7 : Calculate burn severity
+This part creates rasters and computes area
+
+** Severity index 1**
+Christiana modified severity index from 
+https://www.earthdatascience.org/courses/earth-analytics/multispectral-remote-sensing-modis/calculate-dNBR-R-Landsat/ 
+```{r}
+# Create a reclasss file 
+# we can change this at any time 
+sev1 <- c(-Inf,-0.1, 1, # enhanced regrowth
+                -0.1,0.1,2, # unburned
+                0.1,0.27,3, # low severity
+                0.27,.66,4, # moderate severity
+                .66,1.3,5, # moderate to high severity
+                1.3, Inf,6) # high severity
+# Create classs matrix 
+sev1_m <- matrix(sev1, 
+                    ncol = 3,
+                    byrow = T)
+# key
+sev1_Key <- tibble( value = c(1:6),
+                    severity = c("enhanced regrowth","unburned","low severity","moderate severity","moderate to high","high severity"))
+
+```
+
+** Severity index 2**
+http://gsp.humboldt.edu/olm_2015/Courses/GSP_216_Online/lesson5-1/NBR.html
+```{r}
+# Create a reclasss file 
+# ~! can create this into a fucntion?
+# we can change this at any time 
+sev2 <- c(-Inf,-0.1, 1, # enhanced regrowth
+                -0.1,0.1,2, # unburned
+                0.1,0.27,3, # low severity
+                0.27,.66,4, # moderate severity
+                .66,Inf,5) # # high severity
+# Create classs matrix 
+sev2_m <- matrix(sev2, 
+                    ncol = 3,
+                    byrow = T)
+# create key
+sev2_Key <- tibble( value = c(1:5),
+                    severity = c("enhanced regrowth","unburned","low severity","moderate severity","high severity"))
+```
+
+** Severity index 2**
+http://gsp.humboldt.edu/olm_2015/Courses/GSP_216_Online/lesson5-1/NBR.html
+```{r}
+# Create a reclasss file 
+# ~! can create this into a fucntion?
+# we can change this at any time 
+sev2 <- c(-Inf,-0.1, 1, # enhanced regrowth
+                -0.1,0.1,2, # unburned
+                0.1,0.27,3, # low severity
+                0.27,.66,4, # moderate severity
+                .66,Inf,5) # # high severity
+# Create classs matrix 
+sev2_m <- matrix(sev2, 
+                    ncol = 3,
+                    byrow = T)
+# create key
+sev2_Key <- tibble( value = c(1:5),
+                    severity = c("enhanced regrowth","unburned","low severity","moderate severity","high severity"))
+```
+
+
+```{r}
+# read in function
+source("./Functions/severityIndex.R")
+# list dNbr files
+list.dNbr <- list.files(outDNBR, pattern = "_dNBR.*tif$",full.names = T)
+
+## apply first severity index
+lapply(list.dNbr, severityIndex, reclass_m = sev1_m, appendName = "sev1")
+
+## apply sectiond index
+lapply(list.dNbr, severityIndex, reclass_m = sev2_m, appendName = "sev2")
+
+
+```
+
+
+```{r}
+# ~! should make more systematic
+# probably just take from the table?
+# this will need to be updated post crop
+list.sev <- list.files(outDNBR, pattern = "sev", full.names = T)
+# list shapefiles (need to fix)
+listShp <- list.files(inShp,pattern = "shp$", full.names = T, recursive =  T)
+
+for(i in 1:length(list.sev)){
+  rasterFileName <- list.sev[i] #i
+  # fire event
+  fireEvent <- tolower(str_extract(basename(rasterFileName),"(Gap|Paradise|Soberanes)"))
+  for (j in 1:length(listShp)){
+    shpName <- listShp[j] # j
+  # ~! bad string matching
+    shpFire <- str_extract(basename(shpName),"(gap|paradise|soberanes)")
+    if(fireEvent == shpFire){
+             # stack raster
+    myRaster <- stack(rasterFileName)
+    # read in fire perimeter
+    roi <- readOGR(shpName) 
+    # reproject perimeter to raster
+    roi_trans <- spTransform(roi, CRS = crs(myRaster))
+    # crop raster
+    rast.crop <- mask(crop(myRaster, roi_trans),roi_trans) 
+    # write Crop raster for mapping 
+    writeRaster(rast.crop, paste0(file_path_sans_ext(rasterFileName),"_crop"),format = "GTiff",overwrite = T)
+    # satellite res
+    resSat<- res(rast.crop)
+    # calcualte area by raster pixel value
+    areaCalc <- as.data.frame(freq(rast.crop, useNA="no")) %>%
+      setNames(c("value","count")) %>% 
+      mutate(area_km2 = count * prod(resSat) *  1e-06,
+             area_acre = area_km2 * 247.105,
+             productName = basename(rasterFileName),
+             sevIndex = str_extract(productName, "(sev1|sev2)"),
+             key = ifelse(sevIndex == "sev2",sev2_Key$severity,sev1_Key$severity))
+    write_csv(areaCalc, paste0(outArea,"/",basename(rasterFileName),"_area.csv"))
+
+
+    } else {
+      print("no match")
+    }
+  }
+}
+
+
+
+################# Turn the above into a function somehow? ##################
+# cropAreaCount <- function(rasterFileName, roiName ){
+#   
+#   rasterFileName <- list.sev[1]
+#   # stack raster
+#   myRaster <- stack(rasterFileName)
+#   # read in fire perimeter
+#   roi <- readOGR(listShp[2])
+#   # reproject perimeter to raster
+#   roi_trans <- spTransform(roi, CRS = crs(myRaster))
+#   # crop raster
+#   rast.crop <- mask(crop(myRaster, roi_trans),roi_trans) 
+#   #
+#   # satellite res
+#   resSat<- res(rast.crop)[[1]]
+#   areaCalc <- as.data.frame(freq(rast.crop, useNA="no")) %>%
+#     setNames(c("value","count")) %>% 
+#     mutate(area_km2 = count * prod(resSat) *  1e-06,
+#            area_acre = area_km2 * 247.105)
+#  }
+
+```
+
+
